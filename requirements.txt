@@ -2,4 +2,5 @@ streamlit
 yfinance
 crewai
 ollama
-pydantic<2
+instructor==1.15.4
+rich<15
