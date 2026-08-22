@@ -1,11 +1,8 @@
 import streamlit as st
 import yfinance as yf
 from datetime import datetime
-from crewai import Agent, Task, Crew, Process
-from crewai import LLM
+from groq import Groq
 
-import crewai.llms.cache as _crewai_cache
-_crewai_cache.mark_cache_breakpoint = lambda msg: msg
 
 
 # ============================================================
@@ -696,81 +693,45 @@ def get_stock_data(ticker):
 
 def generate_analysis(data):
 
-    local_llm = LLM(
-        model="groq/llama-3.1-8b-instant",
-        temperature=0.22
-    )
+    # Get the Groq API key from Streamlit secrets first.
+    # For local development, fall back to the environment variable.
+    groq_api_key = None
 
+    try:
+        groq_api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
 
-    financial_analyst = Agent(
+    if not groq_api_key:
+        import os
+        groq_api_key = os.getenv("GROQ_API_KEY")
 
-        role="Senior Financial Analyst",
+    if not groq_api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is not configured. "
+            "Add it to Streamlit Secrets as GROQ_API_KEY."
+        )
 
-        goal=(
-            "Produce a clear, concise and professional "
-            "financial analysis from verified market data."
-        ),
+    # Direct Groq SDK connection.
+    # No CrewAI, LiteLLM, or OpenAI dependency is used here.
+    client = Groq(api_key=groq_api_key)
 
-        backstory="""
-
+    system_prompt = """
 You are a professional financial analyst.
 
-Your job is to interpret financial and market information
-and explain it clearly to an ordinary investor.
+Your job is to interpret verified financial and market
+information and explain it clearly to an ordinary investor.
 
-Do NOT simply repeat raw numbers.
+Rules:
+- Use only the market data provided by the application.
+- Do not invent financial figures.
+- Do not claim that a stock is guaranteed to rise or fall.
+- Do not simply repeat raw numbers; explain what they mean.
+- Keep the explanation clear, concise, and professional.
+- The final recommendation must agree with the system recommendation.
+"""
 
-Explain what the numbers mean.
-
-Your analysis must contain:
-
-### Executive Summary
-
-Explain the overall situation in simple language.
-
-### Technical View
-
-Explain the current price compared with the
-5-day moving average.
-
-### Strengths
-
-Give 2 or 3 relevant strengths.
-
-### Risks
-
-Give 2 or 3 relevant risks.
-
-### Final Assessment
-
-Give a clear recommendation:
-
-BUY
-HOLD
-or
-SELL
-
-The recommendation must agree with the system
-recommendation provided in the market data.
-
-Do not invent financial figures.
-
-Do not claim that a stock is guaranteed to rise or fall.
-
-Keep everything understandable to an ordinary investor.
-
-""",
-
-        llm=local_llm,
-
-        verbose=False
-    )
-
-
-    task = Task(
-
-        description=f"""
-
+    user_prompt = f"""
 Analyze the following verified market information.
 
 Company:
@@ -806,33 +767,23 @@ Short-Term Trend:
 System Recommendation:
 {data['recommendation']}
 
-
-Write a readable financial analysis.
-
-Use these sections:
+Write the financial analysis using exactly these sections:
 
 ### Executive Summary
-
-Explain what is happening and what it means.
+Explain the overall situation in simple language.
 
 ### Technical View
-
-Explain the relationship between the current
-price and the 5-day moving average. Also interpret
-the provided 5-day momentum, 5-day volatility,
-and 14-day RSI where useful. Do not invent any
-additional indicators or financial figures.
+Explain the current price compared with the 5-day moving average.
+Also interpret the provided 5-day momentum, 5-day volatility,
+and 14-day RSI where useful.
 
 ### Strengths
-
 Give 2 or 3 concise points.
 
 ### Risks
-
 Give 2 or 3 concise points.
 
 ### Final Assessment
-
 Start with:
 
 Recommendation: {data['recommendation']}
@@ -840,33 +791,28 @@ Recommendation: {data['recommendation']}
 Then explain clearly why.
 
 Do not invent numbers.
-
+Do not introduce additional indicators.
 Do not simply repeat the data.
-
 Make the conclusion obvious to the reader.
+"""
 
-""",
-
-        expected_output=(
-            "A clear and professional financial analysis "
-            "with an explicit BUY, HOLD or SELL conclusion."
-        ),
-
-        agent=financial_analyst
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ],
+        temperature=0.22,
+        max_completion_tokens=1500
     )
 
-
-    crew = Crew(
-        agents=[financial_analyst],
-        tasks=[task],
-        process=Process.sequential,
-        verbose=False
-    )
-
-
-    result = crew.kickoff()
-
-    return str(result)
+    return response.choices[0].message.content
 
 
 # ============================================================
@@ -1587,7 +1533,7 @@ if st.button("Analyze Company", type="primary"):
     # ========================================================
     st.html("""
     <div class="stack-strip">
-        Built with Python · Streamlit · yFinance · CrewAI · Ollama
+        Built with Python · Streamlit · yFinance · Groq
     </div>
     """)
 
