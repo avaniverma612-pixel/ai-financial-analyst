@@ -2,3 +2,4 @@ streamlit
 yfinance
 crewai
 ollama
+pydantic<2
