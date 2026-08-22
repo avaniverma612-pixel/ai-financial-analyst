@@ -694,9 +694,8 @@ def get_stock_data(ticker):
 def generate_analysis(data):
 
     local_llm = LLM(
-        model="ollama/llama3.2:3b",
-        base_url="http://localhost:11434",
-        temperature=0.2
+        model="openai/gpt-4o-mini",
+        temperature=0.22
     )
 
 

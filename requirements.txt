@@ -1,6 +1,6 @@
 streamlit
 yfinance
 crewai
-ollama
+openai
 instructor==1.15.4
 rich<15
