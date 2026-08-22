@@ -697,7 +697,7 @@ def get_stock_data(ticker):
 def generate_analysis(data):
 
     local_llm = LLM(
-        model="groq/llama-3.3-70b-versatile",
+        model="groq/llama-3.1-8b-instant",
         temperature=0.22
     )
 
