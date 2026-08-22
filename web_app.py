@@ -4,6 +4,9 @@ from datetime import datetime
 from crewai import Agent, Task, Crew, Process
 from crewai import LLM
 
+import crewai.llms.cache as _crewai_cache
+_crewai_cache.mark_cache_breakpoint = lambda msg: msg
+
 
 # ============================================================
 # PAGE CONFIG
