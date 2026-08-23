@@ -1,4 +1,6 @@
 streamlit
 yfinance
-groq==0.31.0
+crewai[litellm]
+groq
+instructor==1.15.4
 rich<15

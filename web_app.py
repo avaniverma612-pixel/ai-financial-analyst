@@ -1,7 +1,14 @@
+import os
 import streamlit as st
 import yfinance as yf
 from datetime import datetime
-from groq import Groq
+from crewai import Agent, Task, Crew, Process, LLM
+
+# CrewAI currently has a known cache_breakpoint issue with some non-Anthropic
+# providers. This compatibility patch prevents that unsupported field from
+# being sent to Groq.
+import crewai.llms.cache as _crewai_cache
+_crewai_cache.mark_cache_breakpoint = lambda msg: msg
 
 
 
@@ -688,131 +695,112 @@ def get_stock_data(ticker):
 
 
 # ============================================================
-# AI ANALYSIS
+# AI ANALYSIS AGENT
 # ============================================================
 
 def generate_analysis(data):
 
-    # Get the Groq API key from Streamlit secrets first.
-    # For local development, fall back to the environment variable.
-    groq_api_key = None
-
+    # Streamlit Secrets -> environment variable so CrewAI/LiteLLM can use it.
     try:
         groq_api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
-        pass
-
-    if not groq_api_key:
-        import os
         groq_api_key = os.getenv("GROQ_API_KEY")
 
     if not groq_api_key:
         raise RuntimeError(
-            "GROQ_API_KEY is not configured. "
-            "Add it to Streamlit Secrets as GROQ_API_KEY."
+            "GROQ_API_KEY is not configured. Add it in Streamlit Secrets."
         )
 
-    # Direct Groq SDK connection.
-    # No CrewAI, LiteLLM, or OpenAI dependency is used here.
-    client = Groq(api_key=groq_api_key)
+    os.environ["GROQ_API_KEY"] = groq_api_key
 
-    system_prompt = """
-You are a professional financial analyst.
+    # The LLM powers the agent. Groq is the provider.
+    llm = LLM(
+        model="groq/openai/gpt-oss-20b",
+        temperature=0.22
+    )
 
-Your job is to interpret verified financial and market
-information and explain it clearly to an ordinary investor.
+    # THIS IS THE ACTUAL AI AGENT.
+    financial_analyst = Agent(
+        role="Senior Financial Analyst",
+        goal=(
+            "Analyze verified market indicators and provide a clear, "
+            "balanced, short-term financial assessment for an ordinary investor."
+        ),
+        backstory=(
+            "You are an experienced financial analyst who specializes in "
+            "interpreting technical market indicators. You explain complex "
+            "financial information clearly, identify both strengths and risks, "
+            "and never invent data or guarantee investment outcomes."
+        ),
+        llm=llm,
+        verbose=False,
+        allow_delegation=False
+    )
 
-Rules:
-- Use only the market data provided by the application.
-- Do not invent financial figures.
-- Do not claim that a stock is guaranteed to rise or fall.
-- Do not simply repeat raw numbers; explain what they mean.
-- Keep the explanation clear, concise, and professional.
-- The final recommendation must agree with the system recommendation.
-"""
+    analysis_task = Task(
+        description=f"""
+Analyze ONLY the verified market information below.
 
-    user_prompt = f"""
-Analyze the following verified market information.
+Company: {data['company_name']}
+Ticker: {data['ticker']}
 
-Company:
-{data['company_name']}
+Current Price: {data['price']:.2f} {data['currency']}
+5-Day Moving Average: {data['ma5']:.2f} {data['currency']}
+Difference: {data['difference']:.2f}
+Percentage Difference: {data['percentage']:.2f}%
+5-Day Price Momentum: {data['five_day_momentum']:.2f}%
+5-Day Volatility: {data['five_day_volatility']:.2f}%
+14-Day RSI: {data['rsi14']:.1f}
+Short-Term Trend: {data['trend']}
+System Recommendation: {data['recommendation']}
 
-Ticker:
-{data['ticker']}
-
-Current Price:
-{data['price']:.2f} {data['currency']}
-
-5-Day Moving Average:
-{data['ma5']:.2f} {data['currency']}
-
-Difference:
-{data['difference']:.2f}
-
-Percentage Difference:
-{data['percentage']:.2f}%
-
-5-Day Price Momentum:
-{data['five_day_momentum']:.2f}%
-
-5-Day Volatility:
-{data['five_day_volatility']:.2f}%
-
-14-Day RSI:
-{data['rsi14']:.1f}
-
-Short-Term Trend:
-{data['trend']}
-
-System Recommendation:
-{data['recommendation']}
-
-Write the financial analysis using exactly these sections:
+Produce exactly these sections:
 
 ### Executive Summary
 Explain the overall situation in simple language.
 
 ### Technical View
-Explain the current price compared with the 5-day moving average.
-Also interpret the provided 5-day momentum, 5-day volatility,
-and 14-day RSI where useful.
+Explain the current price versus the 5-day moving average.
+Interpret momentum, volatility and RSI where useful.
 
 ### Strengths
-Give 2 or 3 concise points.
+Give 2 or 3 concise positive points supported by the data.
 
 ### Risks
-Give 2 or 3 concise points.
+Give 2 or 3 concise risks supported by the data.
 
 ### Final Assessment
-Start with:
-
+Start exactly with:
 Recommendation: {data['recommendation']}
 
-Then explain clearly why.
+Then explain why.
 
-Do not invent numbers.
-Do not introduce additional indicators.
-Do not simply repeat the data.
-Make the conclusion obvious to the reader.
-"""
-
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ],
-        temperature=0.22,
-        max_completion_tokens=1500
+Rules:
+- Use only the supplied data.
+- Do not invent figures or indicators.
+- Do not promise profits or certainty.
+- The final recommendation must match the system recommendation.
+- This is a short-term analytical signal, not guaranteed financial advice.
+""",
+        expected_output=(
+            "A clear, structured financial analysis containing Executive Summary, "
+            "Technical View, Strengths, Risks and Final Assessment."
+        ),
+        agent=financial_analyst
     )
 
-    return response.choices[0].message.content
+    # A Crew executes the task assigned to the Financial Analyst Agent.
+    financial_crew = Crew(
+        agents=[financial_analyst],
+        tasks=[analysis_task],
+        process=Process.sequential,
+        verbose=False
+    )
+
+    result = financial_crew.kickoff()
+
+    # CrewAI returns a CrewOutput object; .raw is the generated analysis.
+    return result.raw
 
 
 # ============================================================
