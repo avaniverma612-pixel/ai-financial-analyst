@@ -1,1537 +1,867 @@
 import os
+from datetime import datetime
+
+import altair as alt
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import plotly.express as px
 import streamlit as st
 import yfinance as yf
-from datetime import datetime
-from crewai import Agent, Task, Crew, Process, LLM
 
-# CrewAI currently has a known cache_breakpoint issue with some non-Anthropic
-# providers. This compatibility patch prevents that unsupported field from
-# being sent to Groq.
-import crewai.llms.cache as _crewai_cache
-_crewai_cache.mark_cache_breakpoint = lambda msg: msg
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier, plot_tree
 
+try:
+    from crewai import Agent, Task, Crew, Process, LLM
+    import crewai.llms.cache as _crewai_cache
+    _crewai_cache.mark_cache_breakpoint = lambda msg: msg
+    CREWAI_AVAILABLE = True
+except Exception:
+    CREWAI_AVAILABLE = False
 
 
 # ============================================================
 # PAGE CONFIG
 # ============================================================
-
 st.set_page_config(
     page_title="AI Financial Analyst",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-
 # ============================================================
-# CUSTOM CSS
+# STYLING
 # ============================================================
-
-st.html("""
+st.markdown("""
 <style>
-
-.stApp {
-    background-color: #0b1020;
-}
-
-.block-container {
-    max-width: 1200px;
-    padding-top: 45px;
-    padding-bottom: 50px;
-}
-
-
-/* HEADER */
-
-.main-title {
-    font-size: 42px;
-    font-weight: 750;
-    color: #f8fafc;
-    margin-bottom: 6px;
-}
-
-.subtitle {
-    color: #94a3b8;
-    font-size: 17px;
-    margin-bottom: 30px;
-}
-
-
-/* COMPANY CARD */
-
-.company-card {
-    background: #151d33;
-    border: 1px solid #293756;
-    border-radius: 18px;
-    padding: 28px;
-    margin-top: 25px;
-    margin-bottom: 20px;
-}
-
-.company-name {
-    font-size: 30px;
-    font-weight: 700;
-    color: #f8fafc;
-}
-
-.company-ticker {
-    color: #94a3b8;
-    font-size: 16px;
-    margin-top: 7px;
-}
-
-
-/* METRICS */
-
-.metric-card {
-    background: #151d33;
-    border: 1px solid #293756;
-    border-radius: 15px;
-    padding: 22px;
-    min-height: 115px;
-}
-
-.metric-label {
-    color: #94a3b8;
-    font-size: 14px;
-    margin-bottom: 10px;
-}
-
-.metric-value {
-    color: #f8fafc;
-    font-size: 27px;
-    font-weight: 700;
-}
-
-
-/* CHART */
-
-.chart-card {
-    background: #151d33;
-    border: 1px solid #293756;
-    border-radius: 18px;
-    padding: 22px;
-    margin-top: 25px;
-    margin-bottom: 25px;
-}
-
-.chart-title {
-    color: #f8fafc;
-    font-size: 22px;
-    font-weight: 700;
-    margin-bottom: 4px;
-}
-
-.chart-subtitle {
-    color: #94a3b8;
-    font-size: 14px;
-    margin-bottom: 15px;
-}
-
-
-/* RECOMMENDATION */
-
-.recommendation-card {
-    border-radius: 18px;
-    padding: 28px;
-    margin-top: 25px;
-    margin-bottom: 30px;
-    text-align: center;
-}
-
-.recommendation-label {
-    font-size: 14px;
-    font-weight: 600;
-    color: #cbd5e1;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-}
-
-.recommendation-value {
-    font-size: 46px;
-    font-weight: 800;
-    margin: 8px 0;
-}
-
-.recommendation-text {
-    font-size: 17px;
-    color: #e2e8f0;
-    max-width: 800px;
-    margin: auto;
-}
-
-
-/* BUY */
-
-.buy {
-    background: #123524;
-    border: 1px solid #287a50;
-}
-
-.buy .recommendation-value {
-    color: #4ade80;
-}
-
-
-/* HOLD */
-
-.hold {
-    background: #352b12;
-    border: 1px solid #8a6b1d;
-}
-
-.hold .recommendation-value {
-    color: #facc15;
-}
-
-
-/* SELL */
-
-.sell {
-    background: #3a171b;
-    border: 1px solid #8a3038;
-}
-
-.sell .recommendation-value {
-    color: #f87171;
-}
-
-
-/* SECTION */
-
-.section-title {
-    color: #f8fafc;
-    font-size: 26px;
-    font-weight: 700;
-    margin-top: 35px;
-    margin-bottom: 18px;
-}
-
-
-/* INFO / METHODOLOGY */
-
-.info-strip {
-    background: #11182b;
-    border: 1px solid #293756;
-    border-radius: 14px;
-    padding: 14px 18px;
-    margin-top: 18px;
-    margin-bottom: 24px;
-}
-
-.info-label {
-    color: #64748b;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    margin-bottom: 5px;
-}
-
-.info-value {
-    color: #e2e8f0;
-    font-size: 14px;
-}
-
-.signal-card {
-    background: #151d33;
-    border: 1px solid #293756;
-    border-radius: 18px;
-    padding: 24px;
-    margin-top: 28px;
-    margin-bottom: 24px;
-}
-
-.signal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 20px;
-    margin-bottom: 20px;
-}
-
-.signal-title {
-    color: #f8fafc;
-    font-size: 20px;
-    font-weight: 700;
-}
-
-.signal-subtitle {
-    color: #94a3b8;
-    font-size: 14px;
-    margin-top: 5px;
-}
-
-.signal-badge {
-    border-radius: 999px;
-    padding: 7px 13px;
-    font-size: 12px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.7px;
-    white-space: nowrap;
-}
-
-.positive-signal {
-    color: #4ade80;
-    background: #123524;
-    border: 1px solid #287a50;
-}
-
-.negative-signal {
-    color: #f87171;
-    background: #3a171b;
-    border: 1px solid #8a3038;
-}
-
-.neutral-signal {
-    color: #facc15;
-    background: #352b12;
-    border: 1px solid #8a6b1d;
-}
-
-.signal-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-}
-
-.signal-item {
-    background: #11182b;
-    border: 1px solid #293756;
-    border-radius: 13px;
-    padding: 16px;
-}
-
-.signal-item-label {
-    color: #64748b;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.7px;
-}
-
-.signal-item-value {
-    color: #f8fafc;
-    font-size: 18px;
-    font-weight: 700;
-    margin-top: 7px;
-}
-
-.signal-item-note {
-    color: #94a3b8;
-    font-size: 13px;
-    line-height: 1.45;
-    margin-top: 5px;
-}
-
-@media (max-width: 800px) {
-    .signal-grid {
-        grid-template-columns: 1fr;
-    }
-
-    .signal-header {
-        flex-direction: column;
-    }
-}
-
-.methodology-card {
-    background: #11182b;
-    border: 1px solid #293756;
-    border-radius: 16px;
-    padding: 22px 24px;
-    margin-top: 24px;
-    margin-bottom: 28px;
-}
-
-.methodology-title {
-    color: #f8fafc;
-    font-size: 18px;
-    font-weight: 700;
-    margin-bottom: 12px;
-}
-
-.methodology-text {
-    color: #94a3b8;
-    font-size: 14px;
-    line-height: 1.65;
-}
-
-.methodology-step {
-    color: #cbd5e1;
-    margin: 7px 0;
-}
-
-/* TECHNICAL INDICATORS */
-
-.technical-card {
-    background: #151d33;
-    border: 1px solid #293756;
-    border-radius: 18px;
-    padding: 24px;
-    margin-top: 28px;
-    margin-bottom: 28px;
-}
-
-.technical-title {
-    color: #f8fafc;
-    font-size: 20px;
-    font-weight: 700;
-    margin-bottom: 5px;
-}
-
-.technical-subtitle {
-    color: #94a3b8;
-    font-size: 14px;
-    margin-bottom: 18px;
-}
-
-.technical-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-}
-
-.technical-item {
-    background: #11182b;
-    border: 1px solid #293756;
-    border-radius: 13px;
-    padding: 17px;
-}
-
-.technical-label {
-    color: #64748b;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.7px;
-}
-
-.technical-value {
-    color: #f8fafc;
-    font-size: 22px;
-    font-weight: 700;
-    margin-top: 7px;
-}
-
-.technical-note {
-    color: #94a3b8;
-    font-size: 13px;
-    line-height: 1.45;
-    margin-top: 5px;
-}
-
-@media (max-width: 800px) {
-    .technical-grid {
-        grid-template-columns: 1fr;
-    }
-}
-
-/* REPORT EXPORT */
-
-.report-card {
-    background: #11182b;
-    border: 1px solid #293756;
-    border-radius: 16px;
-    padding: 22px 24px;
-    margin-top: 28px;
-    margin-bottom: 24px;
-}
-
-.report-title {
-    color: #f8fafc;
-    font-size: 19px;
-    font-weight: 700;
-    margin-bottom: 6px;
-}
-
-.report-text {
-    color: #94a3b8;
-    font-size: 14px;
-    line-height: 1.55;
-    margin-bottom: 16px;
-}
-
-.stack-strip {
-    color: #64748b;
-    font-size: 12px;
-    text-align: center;
-    margin-top: 22px;
-    padding-top: 18px;
-    border-top: 1px solid #1f2a43;
-}
-
-/* DISCLAIMER */
-
-.disclaimer {
-    color: #64748b;
-    font-size: 12px;
-    margin-top: 40px;
-    text-align: center;
-}
-
+.stApp { background: radial-gradient(circle at 15% 0%, #172554 0%, #080d19 34%, #060a12 100%); color:#e5e7eb; }
+.block-container { max-width: 1250px; padding-top: 2rem; padding-bottom: 4rem; }
+[data-testid="stHeader"] { background: transparent; }
+.hero { padding: 26px 0 18px; }
+.eyebrow { color:#8b5cf6; font-size:12px; font-weight:800; letter-spacing:2px; text-transform:uppercase; }
+.hero h1 { font-size:48px; line-height:1.05; margin:8px 0; color:#f8fafc; letter-spacing:-1.5px; }
+.hero p { color:#94a3b8; font-size:17px; max-width:760px; }
+.panel { background:rgba(15,23,42,.78); border:1px solid rgba(148,163,184,.16); border-radius:20px; padding:22px; margin:14px 0; box-shadow:0 18px 50px rgba(0,0,0,.18); }
+.panel-title { color:#f8fafc; font-size:21px; font-weight:800; margin-bottom:4px; }
+.panel-sub { color:#64748b; font-size:13px; margin-bottom:18px; }
+.metric { background:linear-gradient(145deg, rgba(30,41,59,.92), rgba(15,23,42,.9)); border:1px solid rgba(148,163,184,.13); border-radius:16px; padding:18px; min-height:115px; }
+.metric-label { color:#94a3b8; font-size:12px; text-transform:uppercase; letter-spacing:.7px; }
+.metric-value { color:#f8fafc; font-size:27px; font-weight:800; margin-top:8px; }
+.metric-note { color:#64748b; font-size:12px; margin-top:4px; }
+.verdict { border-radius:22px; padding:30px; text-align:center; border:1px solid rgba(255,255,255,.12); box-shadow:0 20px 60px rgba(0,0,0,.22); }
+.verdict-buy { background:linear-gradient(145deg,#052e1b,#0f172a); }
+.verdict-hold { background:linear-gradient(145deg,#3b2f06,#0f172a); }
+.verdict-sell { background:linear-gradient(145deg,#3b0a0a,#0f172a); }
+.verdict-label { color:#cbd5e1; font-size:12px; font-weight:800; letter-spacing:1.5px; text-transform:uppercase; }
+.verdict-value { font-size:54px; font-weight:900; margin:4px 0; }
+.buy-text { color:#4ade80; } .hold-text { color:#facc15; } .sell-text { color:#f87171; }
+.badge { display:inline-block; padding:6px 10px; border-radius:999px; font-size:11px; font-weight:800; }
+.badge-green { background:#052e1b; color:#4ade80; border:1px solid #166534; }
+.badge-yellow { background:#3b2f06; color:#facc15; border:1px solid #854d0e; }
+.badge-red { background:#3b0a0a; color:#f87171; border:1px solid #991b1b; }
+.badge-blue { background:#172554; color:#93c5fd; border:1px solid #1d4ed8; }
+.flow { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; margin:16px 0 8px; }
+.flow-box { background:#111827; border:1px solid #334155; border-radius:12px; padding:12px 15px; text-align:center; color:#e2e8f0; font-size:12px; font-weight:700; }
+.flow-arrow { color:#8b5cf6; font-size:18px; }
+.small { color:#94a3b8; font-size:13px; line-height:1.55; }
+div.stButton > button { border-radius:12px; height:46px; font-weight:800; }
+[data-testid="stDownloadButton"] button { border-radius:12px; font-weight:700; }
+footer { visibility:hidden; }
 </style>
-""")
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.html("""
-<div class="main-title">📈 AI Financial Analyst</div>
-
-<div class="subtitle">
-Enter a company name or stock ticker to receive an AI-powered financial analysis.
-</div>
-""")
-
+""", unsafe_allow_html=True)
 
 # ============================================================
-# FIND TICKER
+# ML CONSTANTS
 # ============================================================
-
-def find_ticker(company_input):
-
-    company_input = company_input.strip()
-
-    if not company_input:
-        return None
-
-    direct_ticker = company_input.upper()
-
-    try:
-        stock = yf.Ticker(direct_ticker)
-        history = stock.history(period="5d")
-
-        if not history.empty:
-            return direct_ticker
-
-    except Exception:
-        pass
-
-    try:
-
-        search = yf.Search(
-            company_input,
-            max_results=10
-        )
-
-        quotes = search.quotes
-
-        if quotes:
-
-            for quote in quotes:
-
-                symbol = quote.get("symbol")
-
-                if symbol:
-                    return symbol
-
-    except Exception:
-        pass
-
-    return None
-
-
-# ============================================================
-# GET STOCK DATA
-# ============================================================
-
-def get_stock_data(ticker):
-
-    stock = yf.Ticker(ticker)
-
-    try:
-
-        history = stock.history(
-            period="1mo",
-            auto_adjust=True
-        )
-
-    except Exception:
-
-        return None
-
-    if history.empty:
-        return None
-
-    history = history.dropna(subset=["Close"])
-
-    if len(history) < 5:
-        return None
-
-    # 5-DAY MOVING AVERAGE
-
-    history["MA5"] = history["Close"].rolling(5).mean()
-
-    latest_price = float(history["Close"].iloc[-1])
-    ma5 = float(history["MA5"].iloc[-1])
-
-    if (
-        latest_price != latest_price
-        or ma5 != ma5
-        or ma5 == 0
-    ):
-        return None
-
-    difference = latest_price - ma5
-
-    percentage = (difference / ma5) * 100
-
-    # ADDITIONAL TECHNICAL INDICATORS
-    recent_close = history["Close"].tail(5)
-
-    five_day_momentum = (
-        (float(recent_close.iloc[-1]) / float(recent_close.iloc[0])) - 1
-    ) * 100
-
-    daily_returns = history["Close"].pct_change().dropna().tail(5)
-    five_day_volatility = float(daily_returns.std() * 100) if len(daily_returns) >= 2 else 0.0
-
-    delta = history["Close"].diff()
-    gains = delta.clip(lower=0)
-    losses = -delta.clip(upper=0)
-    avg_gain = gains.rolling(14).mean().iloc[-1]
-    avg_loss = losses.rolling(14).mean().iloc[-1]
-
-    if avg_loss == 0:
-        rsi14 = 100.0 if avg_gain > 0 else 50.0
-    else:
-        rs = avg_gain / avg_loss
-        rsi14 = 100 - (100 / (1 + rs))
-
-
-    # SHORT-TERM TREND
-
-    if percentage >= 1:
-
-        trend = "Bullish"
-
-    elif percentage <= -1:
-
-        trend = "Bearish"
-
-    else:
-
-        trend = "Neutral"
-
-
-    # RECOMMENDATION
-
-    if percentage >= 2:
-
-        recommendation = "BUY"
-
-    elif percentage <= -2:
-
-        recommendation = "SELL"
-
-    else:
-
-        recommendation = "HOLD"
-
-
-    # COMPANY INFORMATION
-
-    try:
-
-        info = stock.info
-
-        company_name = (
-            info.get("longName")
-            or info.get("shortName")
-            or ticker
-        )
-
-        exchange = info.get("exchange", "")
-
-        currency = info.get("currency", "USD")
-
-    except Exception:
-
-        company_name = ticker
-        exchange = ""
-        currency = "USD"
-
-
-    # KEEP ONLY THE DATA NEEDED FOR THE CHART
-
-    chart_data = history[["Close", "MA5"]].copy()
-
-    chart_data.columns = [
-        "Stock Price",
-        "5-Day Moving Average"
-    ]
-
-
+FEATURES = ["MA5_Ratio", "Momentum5", "Volatility5", "RSI14", "Return1"]
+CLASS_ORDER = ["SELL", "HOLD", "BUY"]
+HORIZONS = {"5 Trading Days": 5, "1 Month": 21, "1 Quarter": 63}
+
+
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50)
+    rsi[(loss == 0) & (gain > 0)] = 100
+    return rsi
+
+
+def download_history(ticker, period="5y"):
+    data = yf.Ticker(ticker).history(period=period, auto_adjust=True)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    if data.empty or "Close" not in data.columns:
+        raise ValueError("No usable market data was returned.")
+    return data.dropna(subset=["Close"]).copy()
+
+
+def build_features(ticker, horizon):
+    history = download_history(ticker, "5y")
+    close = history["Close"].astype(float)
+    history["MA5"] = close.rolling(5).mean()
+    history["MA5_Ratio"] = close / history["MA5"] - 1
+    history["Momentum5"] = close.pct_change(5)
+    history["Return1"] = close.pct_change()
+    history["Volatility5"] = history["Return1"].rolling(5).std()
+    history["RSI14"] = calculate_rsi(close, 14)
+    history["Future_Return"] = close.shift(-horizon) / close - 1
+
+    # Binary target for Logistic Regression.
+    history["UpDown"] = np.where(
+        history["Future_Return"].notna(),
+        (history["Future_Return"] > 0).astype(int),
+        np.nan,
+    )
+
+    # Three-class target for Decision Tree / Random Forest.
+    # +/-1% is used as a neutral zone to avoid treating tiny moves as BUY/SELL.
+    history["Signal"] = np.select(
+        [history["Future_Return"] > 0.01, history["Future_Return"] < -0.01],
+        ["BUY", "SELL"],
+        default="HOLD",
+    )
+    history.loc[history["Future_Return"].isna(), "Signal"] = np.nan
+
+    model = history[FEATURES + ["Future_Return", "UpDown", "Signal"]].replace([np.inf, -np.inf], np.nan).dropna()
+    latest = history[FEATURES].replace([np.inf, -np.inf], np.nan).dropna().iloc[[-1]]
+    return history, model, latest
+
+
+def chronological_split(X, y, horizon=5):
+    """Chronological split with a purge gap to stop training labels crossing into test time.
+
+    Each label uses a future return over `horizon` sessions. The final `horizon`
+    training rows are removed so their label windows cannot overlap the test period.
+    """
+    boundary = int(len(X) * 0.8)
+    train_end = boundary - int(horizon)
+    if train_end < 50 or len(X) - boundary < 20:
+        raise ValueError("Not enough observations for a chronological split with a forward-label purge gap.")
+    return (
+        X.iloc[:train_end], X.iloc[boundary:],
+        y.iloc[:train_end], y.iloc[boundary:],
+        boundary,
+    )
+
+
+def classification_metrics(y_true, y_pred, average="binary"):
     return {
-
-        "ticker": ticker,
-
-        "company_name": company_name,
-
-        "exchange": exchange,
-
-        "currency": currency,
-
-        "price": latest_price,
-
-        "ma5": ma5,
-
-        "difference": difference,
-
-        "percentage": percentage,
-
-        "five_day_momentum": five_day_momentum,
-
-        "five_day_volatility": five_day_volatility,
-
-        "rsi14": float(rsi14),
-
-        "trend": trend,
-
-        "recommendation": recommendation,
-
-        "chart_data": chart_data
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, average=average, zero_division=0),
+        "recall": recall_score(y_true, y_pred, average=average, zero_division=0),
+        "f1": f1_score(y_true, y_pred, average=average, zero_division=0),
     }
 
 
-# ============================================================
-# AI ANALYSIS AGENT
-# ============================================================
+def baseline_accuracy(y_test, multiclass=False):
+    majority = y_test.value_counts().idxmax()
+    return accuracy_score(y_test, [majority] * len(y_test))
 
-def generate_analysis(data):
 
-    # Streamlit Secrets -> environment variable so CrewAI/LiteLLM can use it.
+def train_logistic(ticker, horizon):
+    _, model, latest = build_features(ticker, horizon)
+    X = model[FEATURES]
+    y = model["UpDown"].astype(int)
+    X_train, X_test, y_train, y_test, split = chronological_split(X, y, horizon)
+
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", LogisticRegression(max_iter=2000, random_state=42)),
+    ])
+    pipe.fit(X_train, y_train)
+    pred = pipe.predict(X_test)
+    metrics = classification_metrics(y_test, pred)
+    baseline = baseline_accuracy(y_test)
+    latest_pred = int(pipe.predict(latest[FEATURES])[0])
+    probs = pipe.predict_proba(latest[FEATURES])[0]
+    probability = float(probs[latest_pred])
+    cm = confusion_matrix(y_test, pred, labels=[0, 1])
+    return {
+        "model": "Logistic Regression",
+        "pipeline": pipe,
+        "prediction": "UP" if latest_pred else "DOWN",
+        "probability": probability,
+        "metrics": metrics,
+        "baseline": baseline,
+        "cm": cm,
+        "class_report": classification_report(y_test, pred, labels=[0, 1], target_names=["DOWN", "UP"], output_dict=True, zero_division=0),
+        "classes": ["DOWN", "UP"],
+        "train_size": len(X_train), "test_size": len(X_test), "split": split,
+    }
+
+
+def tune_tree(X_train, y_train, horizon):
+    cv = TimeSeriesSplit(n_splits=3, gap=horizon)
+    search = GridSearchCV(
+        DecisionTreeClassifier(random_state=42, class_weight="balanced"),
+        {"max_depth": [3, 5, 7, None], "min_samples_leaf": [2, 4, 8]},
+        scoring="f1_macro", cv=cv, n_jobs=-1,
+    )
+    search.fit(X_train, y_train)
+    return search
+
+
+def tune_forest(X_train, y_train, horizon):
+    cv = TimeSeriesSplit(n_splits=3, gap=horizon)
+    search = GridSearchCV(
+        RandomForestClassifier(random_state=42, class_weight="balanced", n_jobs=-1),
+        {
+            "n_estimators": [150, 250],
+            "max_depth": [5, 8, None],
+            "min_samples_leaf": [2, 4],
+        },
+        scoring="f1_macro", cv=cv, n_jobs=-1,
+    )
+    search.fit(X_train, y_train)
+    return search
+
+
+def train_multiclass_model(ticker, horizon, kind):
+    _, model, latest = build_features(ticker, horizon)
+    X = model[FEATURES]
+    y = model["Signal"]
+    X_train, X_test, y_train, y_test, split = chronological_split(X, y, horizon)
+
+    if kind == "Decision Tree":
+        search = tune_tree(X_train, y_train, horizon)
+    else:
+        search = tune_forest(X_train, y_train, horizon)
+
+    best = search.best_estimator_
+    pred = best.predict(X_test)
+    metrics = classification_metrics(y_test, pred, average="macro")
+    baseline = baseline_accuracy(y_test, multiclass=True)
+    latest_pred = str(best.predict(latest[FEATURES])[0])
+    probs = best.predict_proba(latest[FEATURES])[0]
+    probability = float(max(probs))
+    labels = list(best.classes_)
+    cm = confusion_matrix(y_test, pred, labels=CLASS_ORDER)
+
+    result = {
+        "model": kind,
+        "estimator": best,
+        "prediction": latest_pred,
+        "probability": probability,
+        "metrics": metrics,
+        "baseline": baseline,
+        "cm": cm,
+        "class_report": classification_report(y_test, pred, labels=CLASS_ORDER, target_names=CLASS_ORDER, output_dict=True, zero_division=0),
+        "classes": labels,
+        "best_params": search.best_params_,
+        "train_size": len(X_train), "test_size": len(X_test), "split": split,
+    }
+    if kind == "Random Forest":
+        result["feature_importance"] = pd.DataFrame({
+            "Feature": FEATURES,
+            "Importance": best.feature_importances_,
+        }).sort_values("Importance", ascending=False)
+    return result
+
+
+@st.cache_data(show_spinner=False)
+def run_all_models(ticker, horizon):
+    return {
+        "logistic": train_logistic(ticker, horizon),
+        "tree": train_multiclass_model(ticker, horizon, "Decision Tree"),
+        "forest": train_multiclass_model(ticker, horizon, "Random Forest"),
+    }
+
+
+def get_current_data(ticker):
+    history = download_history(ticker, "3mo")
+    close = history["Close"].astype(float)
+    history["MA5"] = close.rolling(5).mean()
+    history["Return1"] = close.pct_change()
+    history["Momentum5"] = close.pct_change(5)
+    history["Volatility5"] = history["Return1"].rolling(5).std()
+    history["RSI14"] = calculate_rsi(close, 14)
+    price = float(close.iloc[-1])
+    ma5 = float(history["MA5"].iloc[-1])
+    info = {}
     try:
-        groq_api_key = st.secrets["GROQ_API_KEY"]
+        info = yf.Ticker(ticker).info or {}
     except Exception:
-        groq_api_key = os.getenv("GROQ_API_KEY")
-
-    if not groq_api_key:
-        raise RuntimeError(
-            "GROQ_API_KEY is not configured. Add it in Streamlit Secrets."
-        )
-
-    os.environ["GROQ_API_KEY"] = groq_api_key
-
-    # The LLM powers the agent. Groq is the provider.
-    llm = LLM(
-        model="groq/openai/gpt-oss-20b",
-        temperature=0.22
-    )
-
-    # THIS IS THE ACTUAL AI AGENT.
-    financial_analyst = Agent(
-        role="Senior Financial Analyst",
-        goal=(
-            "Analyze verified market indicators and provide a clear, "
-            "balanced, short-term financial assessment for an ordinary investor."
-        ),
-        backstory=(
-            "You are an experienced financial analyst who specializes in "
-            "interpreting technical market indicators. You explain complex "
-            "financial information clearly, identify both strengths and risks, "
-            "and never invent data or guarantee investment outcomes."
-        ),
-        llm=llm,
-        verbose=False,
-        allow_delegation=False
-    )
-
-    analysis_task = Task(
-        description=f"""
-Analyze ONLY the verified market information below.
-
-Company: {data['company_name']}
-Ticker: {data['ticker']}
-
-Current Price: {data['price']:.2f} {data['currency']}
-5-Day Moving Average: {data['ma5']:.2f} {data['currency']}
-Difference: {data['difference']:.2f}
-Percentage Difference: {data['percentage']:.2f}%
-5-Day Price Momentum: {data['five_day_momentum']:.2f}%
-5-Day Volatility: {data['five_day_volatility']:.2f}%
-14-Day RSI: {data['rsi14']:.1f}
-Short-Term Trend: {data['trend']}
-System Recommendation: {data['recommendation']}
-
-Produce exactly these sections:
-
-### Executive Summary
-Explain the overall situation in simple language.
-
-### Technical View
-Explain the current price versus the 5-day moving average.
-Interpret momentum, volatility and RSI where useful.
-
-### Strengths
-Give 2 or 3 concise positive points supported by the data.
-
-### Risks
-Give 2 or 3 concise risks supported by the data.
-
-### Final Assessment
-Start exactly with:
-Recommendation: {data['recommendation']}
-
-Then explain why.
-
-Rules:
-- Use only the supplied data.
-- Do not invent figures or indicators.
-- Do not promise profits or certainty.
-- The final recommendation must match the system recommendation.
-- This is a short-term analytical signal, not guaranteed financial advice.
-""",
-        expected_output=(
-            "A clear, structured financial analysis containing Executive Summary, "
-            "Technical View, Strengths, Risks and Final Assessment."
-        ),
-        agent=financial_analyst
-    )
-
-    # A Crew executes the task assigned to the Financial Analyst Agent.
-    financial_crew = Crew(
-        agents=[financial_analyst],
-        tasks=[analysis_task],
-        process=Process.sequential,
-        verbose=False
-    )
-
-    result = financial_crew.kickoff()
-
-    # CrewAI returns a CrewOutput object; .raw is the generated analysis.
-    return result.raw
+        pass
+    return {
+        "history": history,
+        "price": price,
+        "ma5": ma5,
+        "ma5_ratio": price / ma5 - 1,
+        "momentum": float(history["Momentum5"].iloc[-1]),
+        "volatility": float(history["Volatility5"].iloc[-1] * 100),
+        "rsi": float(history["RSI14"].iloc[-1]),
+        "company": info.get("longName") or info.get("shortName") or ticker,
+        "exchange": info.get("exchange", ""),
+        "currency": info.get("currency", "USD"),
+        "date": history.index[-1].strftime("%b %d, %Y"),
+    }
 
 
-# ============================================================
-# USER INPUT
-# ============================================================
-
-company_input = st.text_input(
-    "Company name or stock ticker",
-    placeholder="e.g. Apple, NVIDIA, Tesla, Microsoft, AAPL"
-)
+def final_recommendation(results):
+    # Combine only models with the same three-class BUY/HOLD/SELL target.
+    tree_vote = results["tree"]["prediction"]
+    forest_vote = results["forest"]["prediction"]
+    return (tree_vote, True) if tree_vote == forest_vote else ("HOLD", False)
 
 
-# ============================================================
-# BUTTON
-# ============================================================
-
-if st.button("Analyze Company", type="primary"):
-
-    if not company_input.strip():
-
-        st.warning(
-            "Please enter a company name or stock ticker."
-        )
-
-        st.stop()
-
-
-    # FIND COMPANY
-
-    with st.spinner("Finding company..."):
-
-        ticker = find_ticker(company_input)
-
-
-    if ticker is None:
-
-        st.error(
-            "I couldn't find that company. "
-            "Try entering its stock ticker instead."
-        )
-
-        st.stop()
-
-
-    # GET DATA
-
-    with st.spinner("Getting market data..."):
-
-        stock_data = get_stock_data(ticker)
-
-
-    if stock_data is None:
-
-        st.error(
-            "No recent market data could be retrieved "
-            "for this company."
-        )
-
-        st.stop()
-
-
-    # ========================================================
-    # COMPANY HEADER
-    # ========================================================
-
-    exchange_text = ""
-
-    if stock_data["exchange"]:
-
-        exchange_text = " · " + stock_data["exchange"]
-
-
-    st.html(f"""
-
-    <div class="company-card">
-
-        <div class="company-name">
-            {stock_data['company_name']}
-        </div>
-
-        <div class="company-ticker">
-            {stock_data['ticker']}{exchange_text}
-        </div>
-
-    </div>
-
-    """)
-
-
-    # ========================================================
-    # DATA SOURCE / UPDATE INFO
-    # ========================================================
-
-    latest_market_date = None
+def tree_path_summary(estimator, latest_row):
+    """Summarize the actual decision path for the current observation."""
     try:
-        latest_market_date = (
-            yf.Ticker(stock_data["ticker"])
-            .history(period="5d", auto_adjust=True)
-            .dropna(subset=["Close"])
-            .index[-1]
-        )
-        latest_market_date = latest_market_date.strftime("%b %d, %Y")
+        node_indicator = estimator.decision_path(latest_row)
+        leaf_id = int(estimator.apply(latest_row)[0])
+        tree = estimator.tree_
+        feature_names = list(latest_row.columns)
+        node_ids = node_indicator.indices[
+            node_indicator.indptr[0]:node_indicator.indptr[1]
+        ]
+        conditions = []
+        for node_id in node_ids:
+            if node_id == leaf_id:
+                continue
+            feature_index = tree.feature[node_id]
+            if feature_index < 0:
+                continue
+            feature = feature_names[feature_index]
+            threshold = float(tree.threshold[node_id])
+            value = float(latest_row.iloc[0, feature_index])
+            operator = "<=" if value <= threshold else ">"
+            conditions.append(f"{feature} {operator} {threshold:.4f}")
+        if not conditions:
+            return "The fitted tree's current decision path contains no readable split conditions."
+        return "The fitted Decision Tree reached its current prediction through: " + " → ".join(conditions[:4]) + "."
     except Exception:
-        latest_market_date = "Latest available session"
-
-    analysis_time = datetime.now().astimezone().strftime("%b %d, %Y · %I:%M %p")
-
-    st.html(f"""
-    <div class="info-strip">
-        <div style="display:flex; gap:28px; flex-wrap:wrap;">
-            <div>
-                <div class="info-label">Market data source</div>
-                <div class="info-value">Yahoo Finance</div>
-            </div>
-            <div>
-                <div class="info-label">Market data through</div>
-                <div class="info-value">{latest_market_date}</div>
-            </div>
-            <div>
-                <div class="info-label">Analysis generated</div>
-                <div class="info-value">{analysis_time}</div>
-            </div>
-        </div>
-    </div>
-    """)
+        return "The current tree path could not be summarized."
 
 
-    # ========================================================
-    # METRICS
-    # ========================================================
-
-    col1, col2, col3, col4 = st.columns(4)
-
-
-    with col1:
-
-        st.html(f"""
-
-        <div class="metric-card">
-
-            <div class="metric-label">
-                Current Price
-            </div>
-
-            <div class="metric-value">
-                {stock_data['price']:.2f}
-                {stock_data['currency']}
-            </div>
-
-        </div>
-
-        """)
+def baseline_summary(results):
+    rows = []
+    for key in ["logistic", "tree", "forest"]:
+        r = results[key]
+        accuracy = float(r["metrics"]["accuracy"])
+        baseline = float(r["baseline"])
+        delta = accuracy - baseline
+        rows.append({
+            "Model": r["model"],
+            "Test accuracy": accuracy,
+            "Majority baseline": baseline,
+            "Difference": delta,
+            "Result": "Above baseline" if delta > 0 else "Matches baseline" if delta == 0 else "Below baseline",
+        })
+    return pd.DataFrame(rows)
 
 
-    with col2:
-
-        st.html(f"""
-
-        <div class="metric-card">
-
-            <div class="metric-label">
-                5-Day Average
-            </div>
-
-            <div class="metric-value">
-                {stock_data['ma5']:.2f}
-                {stock_data['currency']}
-            </div>
-
-        </div>
-
-        """)
+def model_row(result):
+    m = result["metrics"]
+    return {
+        "Model": result["model"],
+        "Prediction": result["prediction"],
+        "Target": "UP / DOWN" if result["model"] == "Logistic Regression" else "BUY / HOLD / SELL",
+        "Predicted class probability*": result["probability"],
+        "Accuracy": m["accuracy"],
+        "Balanced accuracy": m["balanced_accuracy"],
+        "Precision": m["precision"],
+        "Recall": m["recall"],
+        "F1": m["f1"],
+        "Baseline": result["baseline"],
+    }
 
 
-    with col3:
+def generate_ai_analysis(current, results, horizon_label, recommendation, models_agree):
+    """Short explanation layer; model outputs remain the source of truth."""
+    tree = results["tree"]["prediction"]
+    forest = results["forest"]["prediction"]
+    logistic = results["logistic"]["prediction"]
+    signal_note = (f"Decision Tree and Random Forest agree on {tree}." if models_agree else
+                   f"Decision Tree predicts {tree}, while Random Forest predicts {forest}; the three-class signal is inconclusive and displayed as HOLD.")
+    if not CREWAI_AVAILABLE:
+        return (f"**What the models predict:** Logistic Regression predicts **{logistic}** over {horizon_label.lower()}. {signal_note}\n\n"
+                f"**Why:** The models use MA5 ratio, five-session momentum, five-session volatility, RSI and daily return. These describe recent price behaviour; they do not establish causation.\n\n"
+                f"**What could be wrong:** Market news, earnings, gaps and regime changes are not captured reliably by these indicators.\n\n"
+                f"**How reliable they have been:** Compare balanced accuracy and F1 with each model's majority-class baseline in Model evaluation. Historical test metrics do not guarantee future performance.")
+    try:
+        key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
+        if not key:
+            return "Add `GROQ_API_KEY` to Streamlit Secrets to enable the AI explanation. The quantitative summary remains available above."
+        os.environ["GROQ_API_KEY"] = key
+        llm = LLM(model="groq/openai/gpt-oss-20b", temperature=0.2)
+        agent = Agent(role="Financial data explainer", goal="Explain model outputs accurately and concisely without overstating predictive power.",
+                      backstory="You explain an educational ML experiment, not provide personalized investment advice.",
+                      llm=llm, verbose=False, allow_delegation=False)
+        task = Task(description=f"""Write a concise report with exactly four headings: What the models predict; Why; What could make this wrong; How reliable the models have been.
+Use only these facts: {current['company']} ({current['exchange']}); price {current['price']:.2f} {current['currency']}; horizon {horizon_label}; data through {current['date']}.
+Market: price vs MA5 {current['ma5_ratio']:+.2%}; momentum {current['momentum']:+.2%}; 5-session volatility {current['volatility']:.2f}%; RSI {current['rsi']:.1f}.
+Logistic predicts {logistic} on a binary target, estimated class probability {results['logistic']['probability']:.1%}; Decision Tree predicts {tree} with {results['tree']['probability']:.1%}; Random Forest predicts {forest} with {results['forest']['probability']:.1%}. Signal: {recommendation}; tree/forest agree: {models_agree}.
+Evaluation format is accuracy / balanced accuracy / macro F1 / majority baseline. LR {results['logistic']['metrics']['accuracy']:.1%}/{results['logistic']['metrics']['balanced_accuracy']:.1%}/{results['logistic']['metrics']['f1']:.1%}/{results['logistic']['baseline']:.1%}; DT {results['tree']['metrics']['accuracy']:.1%}/{results['tree']['metrics']['balanced_accuracy']:.1%}/{results['tree']['metrics']['f1']:.1%}/{results['tree']['baseline']:.1%}; RF {results['forest']['metrics']['accuracy']:.1%}/{results['forest']['metrics']['balanced_accuracy']:.1%}/{results['forest']['metrics']['f1']:.1%}/{results['forest']['baseline']:.1%}.
+Do not rank models without naming the metric. If accuracy is below baseline, say so. Raw class probabilities are not calibrated future-price probabilities. Do not invent facts or give investment advice.""",
+                    expected_output="A concise four-part explanation consistent with supplied metrics.", agent=agent)
+        return Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False).kickoff().raw
+    except Exception as exc:
+        return f"AI explanation unavailable ({exc}). The model outputs and measured evaluation remain available above."
 
-        percentage = stock_data["percentage"]
-
-        if percentage >= 0:
-
-            percentage_display = f"+{percentage:.2f}%"
-
-        else:
-
-            percentage_display = f"{percentage:.2f}%"
-
-
-        st.html(f"""
-
-        <div class="metric-card">
-
-            <div class="metric-label">
-                vs. 5-Day Average
-            </div>
-
-            <div class="metric-value">
-                {percentage_display}
-            </div>
-
-        </div>
-
-        """)
-
-
-    with col4:
-
-        st.html(f"""
-
-        <div class="metric-card">
-
-            <div class="metric-label">
-                Short-Term Trend
-            </div>
-
-            <div class="metric-value">
-                {stock_data['trend']}
-            </div>
-
-        </div>
-
-        """)
-
-
-    # ========================================================
-    # 5-DAY STOCK PRICE CHART
-    # ========================================================
-    st.html("""
-    <div class="chart-card">
-        <div class="chart-title">📊 5-Day Stock Price Trend</div>
-        <div class="chart-subtitle">
-            Closing price compared with the 5-day moving average
-        </div>
-    </div>
-    """)
-
-    # Use the most recent 5 trading sessions from the data we already fetched.
-    chart_history = yf.Ticker(stock_data["ticker"]).history(
-        period="5d",
-        auto_adjust=True
+def metric_card(label, value, note):
+    st.markdown(
+        f'<div class="metric"><div class="metric-label">{label}</div>'
+        f'<div class="metric-value">{value}</div><div class="metric-note">{note}</div></div>',
+        unsafe_allow_html=True,
     )
 
-    if chart_history is None or chart_history.empty:
-        st.warning("The 5-day chart data could not be retrieved right now.")
-    else:
-        chart_history = chart_history.dropna(subset=["Close"]).tail(5).copy()
 
-        if len(chart_history) < 2:
-            st.warning("Not enough recent trading data to display the chart.")
-        else:
-            # The 5-day average is calculated from the same five displayed sessions.
-            five_day_average = float(chart_history["Close"].mean())
-            chart_history["5-Day Moving Average"] = five_day_average
-
-            chart_display = chart_history[["Close", "5-Day Moving Average"]].copy()
-            chart_display.columns = ["Stock Price", "5-Day Moving Average"]
-            chart_display.index = chart_display.index.strftime("%b %d")
-            chart_display.index.name = "Trading Day"
-
-            # Altair gives us a cleaner, more presentation-ready chart than st.line_chart.
-            import altair as alt
-
-            chart_long = (
-                chart_display
-                .reset_index()
-                .melt(
-                    id_vars="Trading Day",
-                    var_name="Metric",
-                    value_name="Price"
-                )
-            )
-
-            price_line = (
-                alt.Chart(chart_long[chart_long["Metric"] == "Stock Price"])
-                .mark_line(point=alt.OverlayMarkDef(size=75), strokeWidth=3)
-                .encode(
-                    x=alt.X(
-                        "Trading Day:N",
-                        sort=list(chart_display.index),
-                        title="Trading Day",
-                        axis=alt.Axis(labelAngle=0)
-                    ),
-                    y=alt.Y(
-                        "Price:Q",
-                        title=f"Price ({stock_data['currency']})",
-                        scale=alt.Scale(zero=False)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("Trading Day:N", title="Day"),
-                        alt.Tooltip("Price:Q", title="Stock Price", format=".2f")
-                    ]
-                )
-            )
-
-            average_line = (
-                alt.Chart(chart_long[chart_long["Metric"] == "5-Day Moving Average"])
-                .mark_line(strokeWidth=2, strokeDash=[7, 5])
-                .encode(
-                    x=alt.X(
-                        "Trading Day:N",
-                        sort=list(chart_display.index),
-                        title="Trading Day"
-                    ),
-                    y=alt.Y(
-                        "Price:Q",
-                        title=f"Price ({stock_data['currency']})",
-                        scale=alt.Scale(zero=False)
-                    ),
-                    tooltip=[
-                        alt.Tooltip("Trading Day:N", title="Day"),
-                        alt.Tooltip("Price:Q", title="5-Day Average", format=".2f")
-                    ]
-                )
-            )
-
-            st.altair_chart(
-                (price_line + average_line)
-                .properties(height=390)
-                .configure_view(strokeOpacity=0)
-                .configure_axis(
-                    labelColor="#cbd5e1",
-                    titleColor="#94a3b8",
-                    gridColor="#293756",
-                    domainColor="#293756"
-                )
-                .configure_legend(
-                    title=None,
-                    labelColor="#e2e8f0",
-                    orient="bottom"
-                ),
-                use_container_width=True
-            )
-
-            chart_col1, chart_col2 = st.columns(2)
-            with chart_col1:
-                st.metric(
-                    "5-Day Average",
-                    f"{five_day_average:.2f} {stock_data['currency']}"
-                )
-            with chart_col2:
-                change = (
-                    (float(chart_history["Close"].iloc[-1]) /
-                     float(chart_history["Close"].iloc[0]) - 1) * 100
-                )
-                st.metric(
-                    "5-Day Price Change",
-                    f"{change:+.2f}%"
-                )
-
-    # ========================================================
-    # SIGNAL BREAKDOWN
-    # ========================================================
-
-    if stock_data["percentage"] > 0:
-        position_text = "above"
-        position_class = "positive-signal"
-    elif stock_data["percentage"] < 0:
-        position_text = "below"
-        position_class = "negative-signal"
-    else:
-        position_text = "at"
-        position_class = "neutral-signal"
-
-    if stock_data["trend"] == "Bullish":
-        trend_class = "positive-signal"
-        trend_explanation = "Price is meaningfully above the 5-day average."
-    elif stock_data["trend"] == "Bearish":
-        trend_class = "negative-signal"
-        trend_explanation = "Price is meaningfully below the 5-day average."
-    else:
-        trend_class = "neutral-signal"
-        trend_explanation = "The difference from the 5-day average is relatively small."
-
-    st.html(f"""
-    <div class="signal-card">
-        <div class="signal-header">
-            <div>
-                <div class="signal-title">What is driving the signal?</div>
-                <div class="signal-subtitle">The recommendation is based on the verified short-term indicators below.</div>
-            </div>
-            <div class="signal-badge {trend_class}">{stock_data['trend']}</div>
-        </div>
-
-        <div class="signal-grid">
-            <div class="signal-item">
-                <div class="signal-item-label">Price position</div>
-                <div class="signal-item-value">{position_text} 5-day average</div>
-                <div class="signal-item-note">{stock_data['percentage']:+.2f}% vs. moving average</div>
-            </div>
-
-            <div class="signal-item">
-                <div class="signal-item-label">Trend classification</div>
-                <div class="signal-item-value">{stock_data['trend']}</div>
-                <div class="signal-item-note">{trend_explanation}</div>
-            </div>
-
-            <div class="signal-item">
-                <div class="signal-item-label">System decision</div>
-                <div class="signal-item-value">{stock_data['recommendation']}</div>
-                <div class="signal-item-note">Rule-based short-term signal</div>
-            </div>
-        </div>
-    </div>
-    """)
+def show_confusion_matrix(matrix, labels, title):
+    # Compact, readable table rather than a giant default Matplotlib plot.
+    frame = pd.DataFrame(matrix, index=[f"Actual {x}" for x in labels],
+                         columns=[f"Predicted {x}" for x in labels])
+    st.markdown(f"**{title}**")
+    st.dataframe(frame, use_container_width=True)
 
 
-    # ========================================================
-    # TECHNICAL INDICATORS
-    # ========================================================
 
-    rsi = stock_data["rsi14"]
-
-    if rsi >= 70:
-        rsi_note = "Above 70, indicating an overbought reading."
-    elif rsi <= 30:
-        rsi_note = "Below 30, indicating an oversold reading."
-    else:
-        rsi_note = "Within the commonly used neutral range."
-
-    momentum = stock_data["five_day_momentum"]
-
-    if momentum > 0:
-        momentum_note = "The stock gained over the five displayed trading sessions."
-    elif momentum < 0:
-        momentum_note = "The stock declined over the five displayed trading sessions."
-    else:
-        momentum_note = "The stock was essentially unchanged over the five displayed trading sessions."
-
-    volatility = stock_data["five_day_volatility"]
-
-    st.html(f"""
-    <div class="technical-card">
-        <div class="technical-title">Technical Indicators</div>
-        <div class="technical-subtitle">Additional quantitative context used by the AI analyst.</div>
-
-        <div class="technical-grid">
-            <div class="technical-item">
-                <div class="technical-label">5-Day Momentum</div>
-                <div class="technical-value">{momentum:+.2f}%</div>
-                <div class="technical-note">{momentum_note}</div>
-            </div>
-
-            <div class="technical-item">
-                <div class="technical-label">14-Day RSI</div>
-                <div class="technical-value">{rsi:.1f}</div>
-                <div class="technical-note">{rsi_note}</div>
-            </div>
-
-            <div class="technical-item">
-                <div class="technical-label">5-Day Volatility</div>
-                <div class="technical-value">{volatility:.2f}%</div>
-                <div class="technical-note">Standard deviation of recent daily returns.</div>
-            </div>
-        </div>
-    </div>
-    """)
+# ============================================================
+# GLOBAL MARKET PULSE
+# ============================================================
+GLOBAL_MARKETS = [
+    {"region": "United States", "exchange": "NYSE / Nasdaq", "ticker": "^GSPC", "lat": 40.7128, "lon": -74.0060},
+    {"region": "United Kingdom", "exchange": "London Stock Exchange", "ticker": "^FTSE", "lat": 51.5072, "lon": -0.1276},
+    {"region": "Germany", "exchange": "Frankfurt", "ticker": "^GDAXI", "lat": 50.1109, "lon": 8.6821},
+    {"region": "India", "exchange": "NSE", "ticker": "^NSEI", "lat": 19.0760, "lon": 72.8777},
+    {"region": "Hong Kong", "exchange": "Hong Kong Exchange", "ticker": "^HSI", "lat": 22.3193, "lon": 114.1694},
+    {"region": "Japan", "exchange": "Tokyo Stock Exchange", "ticker": "^N225", "lat": 35.6762, "lon": 139.6503},
+]
 
 
-    # ========================================================
-    # ANALYSIS METHODOLOGY
-    # ========================================================
-
-    st.html("""
-    <div class="methodology-card">
-        <div class="methodology-title">How the analysis works</div>
-        <div class="methodology-text">
-            The application separates <strong>data retrieval</strong> from <strong>AI interpretation</strong>.
-            Verified market data is retrieved first, quantitative indicators are calculated, and only then is the
-            resulting information passed to the AI financial analyst.
-            <div class="methodology-step"><strong>1.</strong> Retrieve recent market data for the selected company.</div>
-            <div class="methodology-step"><strong>2.</strong> Calculate the 5-day moving average and price difference.</div>
-            <div class="methodology-step"><strong>3.</strong> Classify the short-term signal as Bullish, Neutral, or Bearish.</div>
-            <div class="methodology-step"><strong>4.</strong> Generate a BUY, HOLD, or SELL system recommendation.</div>
-            <div class="methodology-step"><strong>5.</strong> Pass the verified indicators to the AI agent for explanation and context.</div>
-        </div>
-    </div>
-    """)
-
-
-    # ========================================================
-    # RECOMMENDATION
-    # ========================================================
-    recommendation = stock_data["recommendation"]
-
-    if recommendation == "BUY":
-        recommendation_class = "buy"
-        recommendation_text = (
-            "The available short-term indicators are positive. "
-            "The system detects enough upward momentum to produce a BUY signal."
-        )
-    elif recommendation == "SELL":
-        recommendation_class = "sell"
-        recommendation_text = (
-            "The available short-term indicators are negative. "
-            "The system detects enough downward pressure to produce a SELL signal."
-        )
-    else:
-        recommendation_class = "hold"
-        recommendation_text = (
-            "The available short-term indicators are mixed or too weak to support "
-            "a strong directional signal. The system therefore recommends HOLD."
-        )
-
-    st.html(f"""
-    <div class="recommendation-card {recommendation_class}">
-        <div class="recommendation-label">AI Investment Recommendation</div>
-        <div class="recommendation-value">{recommendation}</div>
-        <div class="recommendation-text">{recommendation_text}</div>
-    </div>
-    """)
-
-    # ========================================================
-    # AI ANALYSIS
-    # ========================================================
-    st.html("""
-    <div class="section-title">AI Financial Analysis</div>
-    """)
-
-    with st.spinner("AI analyst is preparing the financial analysis..."):
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_global_market_pulse():
+    """Fetch recent index performance and relative trading activity for tracked markets."""
+    rows = []
+    for market in GLOBAL_MARKETS:
         try:
-            analysis = generate_analysis(stock_data)
-            st.markdown(analysis)
+            hist = yf.Ticker(market["ticker"]).history(period="3mo", auto_adjust=True)
+            if hist is None or hist.empty or "Close" not in hist.columns or len(hist) < 6:
+                continue
+            close = hist["Close"].dropna()
+            if len(close) < 6:
+                continue
+            latest_return = float(close.iloc[-1] / close.iloc[-2] - 1)
+            week_return = float(close.iloc[-1] / close.iloc[-6] - 1)
+            volume_value = None
+            volume_ratio = None
+            if "Volume" in hist.columns:
+                volume = hist["Volume"].dropna()
+                if len(volume) >= 6 and float(volume.tail(20).mean()) > 0:
+                    volume_value = int(volume.iloc[-1])
+                    volume_ratio = float(volume.iloc[-1] / volume.tail(20).mean())
+            rows.append({
+                **market,
+                "last_close": float(close.iloc[-1]),
+                "daily_return": latest_return,
+                "weekly_return": week_return,
+                "volume": volume_value,
+                "volume_ratio": volume_ratio,
+                "as_of": str(close.index[-1].date()),
+            })
+        except Exception:
+            continue
+    return pd.DataFrame(rows)
 
-            # ====================================================
-            # DOWNLOADABLE FINANCIAL BRIEF
-            # ====================================================
 
-            recommendation = stock_data["recommendation"]
-            price = stock_data["price"]
-            ma5 = stock_data["ma5"]
-            percentage = stock_data["percentage"]
-            momentum = stock_data["five_day_momentum"]
-            rsi = stock_data["rsi14"]
-            volatility = stock_data["five_day_volatility"]
-            trend = stock_data["trend"]
-            currency = stock_data["currency"]
+# ============================================================
+# UI
+# ============================================================
+st.markdown('''<div class="hero"><div class="eyebrow">Machine Learning · Explainable AI · Market Intelligence</div><h1>AI Financial Analyst</h1><p>Train and compare machine-learning models on historical market data, understand what drives their predictions, and generate an AI-assisted financial interpretation.</p></div>''', unsafe_allow_html=True)
 
-            if percentage > 0:
-                price_position = (
-                    f"The stock is trading {percentage:.2f}% above its "
-                    f"5-day moving average, which indicates slightly stronger "
-                    f"short-term price positioning."
-                )
-            elif percentage < 0:
-                price_position = (
-                    f"The stock is trading {abs(percentage):.2f}% below its "
-                    f"5-day moving average, which indicates slightly weaker "
-                    f"short-term price positioning."
-                )
-            else:
-                price_position = (
-                    "The stock is trading almost exactly at its 5-day "
-                    "moving average, so there is little short-term separation."
-                )
+c1, c2, c3 = st.columns([3.5, 1.5, 1])
+with c1:
+    company_input = st.text_input("Company or ticker", value=st.session_state.get("selected_ticker_input", ""), placeholder="e.g. NVIDIA, Apple, MSFT, RELIANCE.NS", label_visibility="collapsed")
+with c2:
+    horizon_options = list(HORIZONS)
+    saved_horizon = st.session_state.get("selected_horizon", horizon_options[0])
+    horizon_label = st.selectbox("Prediction horizon", horizon_options, index=horizon_options.index(saved_horizon) if saved_horizon in horizon_options else 0, label_visibility="collapsed")
+with c3:
+    analyze = st.button("Analyze →", type="primary", use_container_width=True)
 
-            if momentum > 0:
-                momentum_text = (
-                    f"Over the five-day period, the stock gained {momentum:.2f}%. "
-                    "That points to positive recent momentum, although the move "
-                    "should be considered alongside the other indicators."
-                )
-            elif momentum < 0:
-                momentum_text = (
-                    f"Over the five-day period, the stock declined {abs(momentum):.2f}%. "
-                    "That points to weaker recent momentum, although the move "
-                    "should be considered alongside the other indicators."
-                )
-            else:
-                momentum_text = (
-                    "The stock was essentially unchanged over the five-day period, "
-                    "suggesting limited recent directional momentum."
-                )
+if analyze:
+    if not company_input.strip():
+        st.warning("Enter a company name or ticker first.")
+        st.stop()
 
-            if rsi >= 70:
-                rsi_text = (
-                    f"The 14-day RSI is {rsi:.1f}, which is in a relatively "
-                    "high range and may indicate stronger buying momentum."
-                )
-            elif rsi <= 30:
-                rsi_text = (
-                    f"The 14-day RSI is {rsi:.1f}, which is in a relatively "
-                    "low range and may indicate stronger selling pressure."
-                )
-            else:
-                rsi_text = (
-                    f"The 14-day RSI is {rsi:.1f}, which sits in a broadly "
-                    "neutral range rather than indicating an extreme condition."
-                )
+    with st.spinner("Finding company and evaluating the models..."):
+        try:
+            ticker_input = company_input.strip().upper()
+            ticker = ticker_input
+            try:
+                test = yf.Ticker(ticker).history(period="5d")
+                if test.empty:
+                    raise ValueError
+            except Exception:
+                search = yf.Search(company_input.strip(), max_results=10)
+                quotes = getattr(search, "quotes", []) or []
+                if not quotes or not quotes[0].get("symbol"):
+                    raise ValueError("Company not found. Try its exchange ticker, e.g. RELIANCE.NS.")
+                ticker = quotes[0]["symbol"]
+            horizon = HORIZONS[horizon_label]
+            current = get_current_data(ticker)
+            results = run_all_models(ticker, horizon)
+            st.session_state["analysis_payload"] = {"ticker": ticker, "current": current, "results": results, "horizon": horizon, "horizon_label": horizon_label, "company_input": company_input.strip()}
+            st.session_state["selected_ticker_input"] = company_input.strip()
+            st.session_state["selected_horizon"] = horizon_label
+        except Exception as exc:
+            st.error(f"Analysis failed: {exc}")
+            st.stop()
+elif st.session_state.get("analysis_payload"):
+    saved = st.session_state["analysis_payload"]
+    ticker = saved["ticker"]
+    current = saved["current"]
+    results = saved["results"]
+    horizon = saved["horizon"]
+    horizon_label = saved["horizon_label"]
+    company_input = saved["company_input"]
 
-            volatility_text = (
-                f"Recent five-day volatility is {volatility:.2f}%, giving an "
-                "indication of how much the stock's daily returns have been moving."
+if st.session_state.get("analysis_payload"):
+    saved = st.session_state["analysis_payload"]
+    ticker = saved["ticker"]
+    current = saved["current"]
+    results = saved["results"]
+    horizon = saved["horizon"]
+    horizon_label = saved["horizon_label"]
+    recommendation, models_agree = final_recommendation(results)
+    verdict_class = {"BUY":"verdict-buy buy-text", "HOLD":"verdict-hold hold-text", "SELL":"verdict-sell sell-text"}[recommendation]
+    votes = [results["tree"]["prediction"], results["forest"]["prediction"]]
+    accuracy_below_baseline = any(results[k]["metrics"]["accuracy"] < results[k]["baseline"] for k in ["logistic", "tree", "forest"])
+
+    st.markdown(f'''<div class="panel"><div class="panel-title">{current['company']}</div><div class="panel-sub">{ticker} · {current['exchange']} · Data through {current['date']} · Forecast horizon: {horizon_label}</div></div>''', unsafe_allow_html=True)
+    st.markdown(f'''<div class="verdict {verdict_class}"><div class="verdict-label">Experimental model signal · {horizon_label}</div><div class="verdict-value">{recommendation}</div><div class="small">{('Decision Tree and Random Forest agree.' if models_agree else f"Models disagree: Decision Tree = {votes[0]}, Random Forest = {votes[1]}. HOLD is a cautious fallback, not a confident forecast.")} Logistic Regression separately predicts {results['logistic']['prediction']} on an UP/DOWN target.</div></div>''', unsafe_allow_html=True)
+    st.caption("Educational experiment only — not financial advice. Historical test performance is limited and does not establish that this signal will be accurate.")
+    if accuracy_below_baseline:
+        st.warning("At least one model performs below its majority-class baseline. The Machine Learning tab shows each model's exact accuracy, baseline and difference.")
+
+    # Immediate explanation of disagreement between the ML signal and market context.
+    ma_deviation = current["ma5_ratio"]
+    if recommendation == "BUY" and ma_deviation < 0:
+        st.info(f"**Why BUY when the market looks bearish?** Decision Tree and Random Forest classify the current feature combination as BUY, but the price is {ma_deviation:.2%} below MA5. That is conflicting evidence, not something the app should explain away. The fitted tree's actual decision path and test performance are available in Machine Learning.")
+    elif recommendation == "SELL" and ma_deviation > 0:
+        st.info(f"**Why SELL when price is above MA5?** The tree and forest classify the current feature combination as SELL, while price is {ma_deviation:+.2%} above MA5. Treat this as a conflict between the model signal and market context; inspect the evaluation before drawing conclusions.")
+    elif recommendation == "BUY":
+        st.info("**Why BUY?** Decision Tree and Random Forest agree on the BUY class. This is the models' classification of the engineered features, not proof of future gains; inspect the historical test results and tree path below.")
+    elif recommendation == "SELL":
+        st.info("**Why SELL?** Decision Tree and Random Forest agree on the SELL class. This is an experimental classification, not proof of future losses; inspect the historical test results and tree path below.")
+    else:
+        st.info("**Why HOLD?** The three-class models disagree or classify the current features as HOLD. HOLD is a cautious display state, not a prediction that the price will remain unchanged.")
+
+    # Four compact market cards, each with its interpretation (no repeated context table).
+    cols = st.columns(4)
+    ma_note = "Price is above its 5-session average." if current["ma5_ratio"] > 0 else "Price is below its 5-session average." if current["ma5_ratio"] < 0 else "Price is at its 5-session average."
+    rsi_note = "Near neutral; not strongly overbought or oversold." if 40 <= current["rsi"] <= 60 else "Relatively overbought." if current["rsi"] > 70 else "Relatively oversold." if current["rsi"] < 30 else "Momentum is leaning away from neutral."
+    labels = ["Current price", "Vs. MA5", "RSI (14)", "5-session volatility"]
+    values = [f"{current['price']:.2f} {current['currency']}", f"{current['ma5_ratio']:+.2%}", f"{current['rsi']:.1f}", f"{current['volatility']:.2f}%"]
+    notes = ["Latest adjusted close", ma_note, rsi_note, "Recent return variability; not a direction forecast"]
+    for col, label, value, note in zip(cols, labels, values, notes):
+        with col:
+            metric_card(label, value, note)
+
+    # The summary describes observable evidence and model outputs without inventing a reason.
+    trend_history = current["history"]["Close"].tail(20).dropna()
+    recent_trend_pct = float(trend_history.iloc[-1] / trend_history.iloc[0] - 1) if len(trend_history) >= 2 else 0.0
+    trend_text = "has risen" if recent_trend_pct > 0.01 else "has fallen" if recent_trend_pct < -0.01 else "has been broadly flat"
+    ma_conflict = current["ma5_ratio"] < 0 and recommendation == "BUY"
+    if recommendation == "BUY":
+        signal_meaning = "The Decision Tree and Random Forest produce a BUY class." if models_agree else "The tree and forest disagree, so HOLD is shown as the cautious fallback rather than a strong BUY."
+    elif recommendation == "SELL":
+        signal_meaning = "The Decision Tree and Random Forest produce a SELL class."
+    else:
+        signal_meaning = "The current three-class signal is HOLD; this is not proof that the price will remain stable."
+    if ma_conflict:
+        market_conflict_text = "This conflicts with the market snapshot: price is below its five-session average."
+    elif current["ma5_ratio"] > 0 and recommendation == "SELL":
+        market_conflict_text = "This conflicts with the market snapshot: price is above its five-session average."
+    else:
+        market_conflict_text = "The moving-average position is context, not a vote in the ML recommendation."
+    st.markdown("#### What this result means")
+    st.write(
+        f"Over the last 20 available sessions, the price {trend_text} ({recent_trend_pct:+.2%} from first to last close). "
+        f"{signal_meaning} {market_conflict_text} The models use MA5 ratio, momentum, volatility, RSI and daily return; "
+        "these inputs describe recent behaviour, but they do not prove causation or guarantee future performance."
+    )
+    if ma_conflict:
+        st.info("**Why BUY despite the bearish market context?** The tree and forest classify the engineered feature combination as BUY; the tree's actual decision path is available in Machine Learning → model evaluation. The falling trend and negative MA5 deviation are genuine counter-signals. Feature importance does not prove which feature caused the BUY result.")
+    elif recommendation == "BUY" and recent_trend_pct < -0.01:
+        st.info("**Conflicting evidence:** the model signal is BUY, but the recent 20-session price trend is negative. Treat the signal as experimental and inspect the model evaluation before drawing conclusions.")
+
+    overview_tab, market_tab, ml_tab, ai_tab, chat_tab, globe_tab = st.tabs(["Overview", "Market", "Machine Learning", "AI Analyst", "Chatbot", "Global Pulse"])
+    with overview_tab:
+        st.markdown('<div class="panel"><div class="panel-title">Recent price trend</div><div class="panel-sub">Last 60 trading sessions with the 5-session moving average.</div></div>', unsafe_allow_html=True)
+        hist = current["history"].tail(60).copy()
+        hist["MA5"] = hist["Close"].rolling(5).mean()
+        chart_data = hist[["Close", "MA5"]].rename(columns={"Close":"Price"}).reset_index()
+        date_col = chart_data.columns[0]
+        long = chart_data.melt(id_vars=date_col, var_name="Series", value_name="Value")
+        price_chart = alt.Chart(long).mark_line().encode(
+            x=alt.X(f"{date_col}:T", title="Trading date"),
+            y=alt.Y("Value:Q", title=f"Price ({current['currency']})", scale=alt.Scale(zero=False)),
+            color=alt.Color("Series:N", title="Series"),
+            tooltip=[alt.Tooltip(f"{date_col}:T", title="Date"), "Series:N", alt.Tooltip("Value:Q", format=".2f")]
+        ).properties(height=350)
+        st.altair_chart(price_chart, use_container_width=True)
+        st.markdown("**What the market indicators say**")
+        st.write(f"{ma_note} RSI is {rsi_note.lower()} Five-session momentum is **{current['momentum']:+.2%}**. These indicators describe recent behaviour; they do not independently confirm a future move.")
+
+    with market_tab:
+        st.markdown('<div class="panel"><div class="panel-title">Market context</div><div class="panel-sub">Interpretations are placed beside the measures they describe.</div></div>', unsafe_allow_html=True)
+        st.write(f"**Price vs. MA5:** {ma_note}")
+        st.write(f"**RSI:** {rsi_note}")
+        st.write(f"**Momentum (5 sessions):** {current['momentum']:+.2%}")
+        st.write(f"**Volatility (5 sessions):** {current['volatility']:.2f}% — recent variability, not a prediction of direction.")
+        st.caption(f"Last available market-data date: {current['date']}. Chart currency: {current['currency']}.")
+
+    comparison = pd.DataFrame([model_row(results["logistic"]), model_row(results["tree"]), model_row(results["forest"])])
+    comparison_display = comparison.copy()
+    pct_cols = ["Predicted class probability*", "Accuracy", "Balanced accuracy", "Precision", "Recall", "F1", "Baseline"]
+    for col in pct_cols:
+        comparison_display[col] = comparison_display[col].map(lambda x: f"{x:.1%}")
+    with ml_tab:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Machine Learning predictions</div>'
+            '<div class="panel-sub">Three models look at recent stock data in different ways.</div></div>',
+            unsafe_allow_html=True,
+        )
+        model_cards = [
+            ("Logistic Regression", results["logistic"], "Predicts whether the price may go UP or DOWN."),
+            ("Decision Tree", results["tree"], "Uses a set of decision rules to suggest BUY, HOLD or SELL."),
+            ("Random Forest", results["forest"], "Combines multiple decision trees to suggest BUY, HOLD or SELL."),
+        ]
+        cols = st.columns(3)
+        for col, (name, result, explanation) in zip(cols, model_cards):
+            with col:
+                st.markdown('<div class="panel">', unsafe_allow_html=True)
+                st.markdown(f"**{name}**")
+                st.markdown(f"### {result['prediction']}")
+                st.caption(explanation)
+                st.markdown('</div>', unsafe_allow_html=True)
+        st.warning(
+            "These predictions are experimental. In the current test, all three models scored below "
+            "a simple majority-class baseline, so their predictions should not be treated as reliable forecasts."
+        )
+        with st.expander("How were the models tested? (optional)"):
+            st.write(
+                f"The models use five technical indicators calculated from historical data and a chronological "
+                f"train/test split, with a {horizon}-trading-session gap to reduce data leakage. "
+                "Logistic Regression predicts UP/DOWN; Decision Tree and Random Forest predict BUY/HOLD/SELL."
             )
 
-            if recommendation == "BUY":
-                decision_text = (
-                    "The system identifies a positive short-term setup. "
-                    "The available indicators provide enough upward evidence "
-                    "for the model's BUY threshold to be reached."
+    with ai_tab:
+        st.markdown('<div class="panel"><div class="panel-title">AI explanation</div><div class="panel-sub">A concise interpretation of the predictions, uncertainty, and measured reliability.</div></div>', unsafe_allow_html=True)
+        with st.spinner("Preparing the concise explanation..."):
+            analysis = generate_ai_analysis(current, results, horizon_label, recommendation, models_agree)
+        st.markdown(analysis)
+
+    with chat_tab:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Ask your AI Financial Analyst</div>'
+            '<div class="panel-sub">Ask questions about the stock, chart, indicators, or model predictions shown in this analysis.</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Answers use the current analysis as context. They are educational explanations, not investment advice.")
+
+        # Keep separate chat history for each selected ticker and forecast horizon.
+        chat_key = f"finance_chat_{ticker}_{horizon_label}"
+        if chat_key not in st.session_state:
+            st.session_state[chat_key] = []
+
+        for message in st.session_state[chat_key]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        question = st.chat_input("Ask about this stock or its predictions…", key=f"chat_input_{ticker}_{horizon_label}")
+        if question:
+            st.session_state[chat_key].append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            market_context = (
+                f"Company: {current['company']} ({ticker}); exchange: {current['exchange']}; "
+                f"price: {current['price']:.2f} {current['currency']}; data date: {current['date']}; "
+                f"forecast horizon: {horizon_label}; price vs MA5: {current['ma5_ratio']:+.2%}; "
+                f"5-session momentum: {current['momentum']:+.2%}; 5-session volatility: {current['volatility']:.2f}%; "
+                f"RSI: {current['rsi']:.1f}. Logistic Regression predicts {results['logistic']['prediction']} (UP/DOWN); "
+                f"Decision Tree predicts {results['tree']['prediction']} (BUY/HOLD/SELL); "
+                f"Random Forest predicts {results['forest']['prediction']} (BUY/HOLD/SELL); "
+                f"overall cautious signal: {recommendation}; tree/forest agree: {models_agree}. "
+                f"Test accuracy vs majority baseline: Logistic Regression {results['logistic']['metrics']['accuracy']:.1%} vs {results['logistic']['baseline']:.1%}; "
+                f"Decision Tree {results['tree']['metrics']['accuracy']:.1%} vs {results['tree']['baseline']:.1%}; "
+                f"Random Forest {results['forest']['metrics']['accuracy']:.1%} vs {results['forest']['baseline']:.1%}."
+            )
+            history_text = "\n".join(
+                f"{m['role'].upper()}: {m['content']}" for m in st.session_state[chat_key][-8:]
+            )
+            try:
+                if not CREWAI_AVAILABLE:
+                    raise RuntimeError("CrewAI is not installed in this environment.")
+                api_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
+                if not api_key:
+                    raise RuntimeError("GROQ_API_KEY is missing. Add it to Streamlit Secrets.")
+                os.environ["GROQ_API_KEY"] = api_key
+                chat_llm = LLM(model="groq/openai/gpt-oss-20b", temperature=0.2)
+                chat_agent = Agent(
+                    role="Financial analysis explainer",
+                    goal="Answer the user's questions clearly using only the supplied stock analysis context.",
+                    backstory="You are a careful tutor explaining an educational stock-analysis app in plain English. You never claim stock predictions are certain.",
+                    llm=chat_llm,
+                    verbose=False,
+                    allow_delegation=False,
                 )
-            elif recommendation == "SELL":
-                decision_text = (
-                    "The system identifies a negative short-term setup. "
-                    "The available indicators provide enough downward evidence "
-                    "for the model's SELL threshold to be reached."
+                chat_task = Task(
+                    description=f"""Answer the latest user question in simple, concise language. Use the supplied context and recent chat only. Do not invent news, prices, or facts. If the context does not answer the question, say so. Explain technical terms simply. Do not give personalized investment advice, and clearly state that the models are experimental and scored below their majority-class baselines.
+
+CURRENT ANALYSIS:
+{market_context}
+
+RECENT CHAT:
+{history_text}
+
+LATEST QUESTION:
+{question}""",
+                    expected_output="A helpful plain-English answer grounded in the provided analysis.",
+                    agent=chat_agent,
                 )
-            else:
-                decision_text = (
-                    "The system does not detect a strong enough short-term signal "
-                    "to justify a BUY or SELL. The indicators are therefore treated "
-                    "as mixed or relatively neutral, resulting in a HOLD."
-                )
+                with st.chat_message("assistant"):
+                    with st.spinner("Thinking..."):
+                        answer = Crew(agents=[chat_agent], tasks=[chat_task], process=Process.sequential, verbose=False).kickoff().raw
+                    st.markdown(answer)
+                st.session_state[chat_key].append({"role": "assistant", "content": str(answer)})
+            except Exception as exc:
+                error_message = f"I couldn't answer just now: {exc}"
+                with st.chat_message("assistant"):
+                    st.warning(error_message)
+                st.session_state[chat_key].append({"role": "assistant", "content": error_message})
 
-            generated_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
-
-            report_lines = [
-                "AI FINANCIAL ANALYST",
-                f"{stock_data['company_name']} ({stock_data['ticker']})",
-                "=" * 64,
-                "",
-                f"Investment Assessment: {recommendation}",
-                "",
-                "AT A GLANCE",
-                "-" * 64,
-                decision_text,
-                "",
-                "MARKET SNAPSHOT",
-                "-" * 64,
-                f"Current price       : {price:.2f} {currency}",
-                f"5-day moving avg.   : {ma5:.2f} {currency}",
-                f"Price vs. average   : {percentage:+.2f}%",
-                f"5-day momentum      : {momentum:+.2f}%",
-                f"14-day RSI          : {rsi:.1f}",
-                f"5-day volatility    : {volatility:.2f}%",
-                f"Short-term trend    : {trend}",
-                "",
-                "WHAT THE INDICATORS SUGGEST",
-                "-" * 64,
-                "",
-                "Price position",
-                price_position,
-                "",
-                "Momentum",
-                momentum_text,
-                "",
-                "RSI",
-                rsi_text,
-                "",
-                "Volatility",
-                volatility_text,
-                "",
-                "AI ANALYST ASSESSMENT",
-                "-" * 64,
-                "",
-                analysis,
-                "",
-                "RECENT PRICE HISTORY",
-                "-" * 64,
-            ]
-
-            for idx, row in stock_data["chart_data"].tail(5).iterrows():
-                date_label = (
-                    idx.strftime("%b %d, %Y")
-                    if hasattr(idx, "strftime")
-                    else str(idx)
-                )
-                report_lines.append(
-                    f"{date_label:<16} {float(row['Stock Price']):.2f} {currency}"
-                )
-
-            report_lines.extend([
-                "",
-                "METHODOLOGY",
-                "-" * 64,
-                "Market data is retrieved through Yahoo Finance. The system",
-                "calculates short-term technical indicators and applies a",
-                "rule-based BUY/HOLD/SELL signal. The verified indicators are",
-                "then provided to the AI financial analyst for interpretation.",
-                "",
-                f"Generated: {generated_at}",
-                "Data source: Yahoo Finance",
-                "",
-                "DISCLAIMER",
-                "-" * 64,
-                "This report is intended for educational purposes only.",
-                "It is not financial advice and should not be used as the",
-                "sole basis for investment decisions.",
-            ])
-
-            report_text = "\n".join(report_lines)
-
-            st.html("""
-            <div class="report-card">
-                <div class="report-title">Download financial brief</div>
-                <div class="report-text">
-                    Save a clean, shareable summary of the market indicators,
-                    AI assessment, methodology and recent price history.
-                </div>
-            </div>
-            """)
-
-            st.download_button(
-                label="⬇ Download Financial Brief",
-                data=report_text,
-                file_name=f"{stock_data['ticker']}_financial_brief.txt",
-                mime="text/plain",
-                use_container_width=True
+    with globe_tab:
+        st.markdown(
+            '<div class="panel"><div class="panel-title">Global Market Pulse</div>'
+            '<div class="panel-sub">Explore recent index movements across selected global markets.</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Each marker represents a market index, not every individual trade. "
+            "Colour shows the latest daily index return; marker size reflects the absolute daily move. "
+            "This is a market snapshot, not a measure of total trading activity or financial advice."
+        )
+        with st.spinner("Loading recent global index data..."):
+            pulse = fetch_global_market_pulse()
+        if pulse.empty:
+            st.warning("Global market data could not be loaded right now. Please try again later.")
+        else:
+            pulse["Daily change"] = pulse["daily_return"].map(lambda v: f"{v:+.2%}")
+            pulse["Weekly change"] = pulse["weekly_return"].map(lambda v: f"{v:+.2%}")
+            pulse["Marker size"] = pulse["daily_return"].abs().clip(lower=0.001) * 100
+            fig = px.scatter_geo(
+                pulse,
+                lat="lat",
+                lon="lon",
+                color="daily_return",
+                size="Marker size",
+                size_max=24,
+                hover_name="region",
+                hover_data={
+                    "exchange": True,
+                    "ticker": True,
+                    "Daily change": True,
+                    "Weekly change": True,
+                    "as_of": True,
+                    "lat": False,
+                    "lon": False,
+                    "daily_return": False,
+                    "weekly_return": False,
+                    "Marker size": False,
+                },
+                projection="orthographic",
+                color_continuous_scale=["#f87171", "#64748b", "#4ade80"],
+                color_continuous_midpoint=0,
+                title="Market momentum around the world",
+            )
+            fig.update_geos(
+                showland=True, landcolor="#111827",
+                showocean=True, oceancolor="#080d19",
+                showcountries=True, countrycolor="#334155",
+                showcoastlines=True, coastlinecolor="#475569",
+                showframe=False, bgcolor="rgba(0,0,0,0)",
+                projection_rotation=dict(lon=10, lat=15, roll=0),
+            )
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e2e8f0",
+                title_font_color="#f8fafc",
+                margin=dict(l=0, r=0, t=55, b=0),
+                height=520,
+                coloraxis_colorbar=dict(title="Daily return", tickformat=".1%"),
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.markdown("#### Regional snapshot")
+            snapshot = pulse[["region", "exchange", "last_close", "Daily change", "Weekly change", "as_of"]].copy()
+            snapshot.columns = ["Market", "Exchange", "Latest index close", "Daily change", "5-session change", "Data date"]
+            st.dataframe(snapshot, use_container_width=True, hide_index=True)
+            st.caption(
+                "Markets shown: S&P 500 (US), FTSE 100 (UK), DAX (Germany), Nifty 50 (India), "
+                "Hang Seng (Hong Kong) and Nikkei 225 (Japan). Index levels are not directly comparable across markets. "
+                "The globe colours and sizes describe recent index price changes; they do not indicate that a region is "
+                "'flourishing' overall or that its trades are more profitable."
             )
 
-        except Exception as e:
-            st.error(
-                "The market data was retrieved successfully, "
-                "but the AI analyst could not complete the analysis."
-            )
-            st.caption(str(e))
+    report = f"""AI FINANCIAL ANALYST — EDUCATIONAL REPORT
+{current['company']} ({ticker}) · {current['exchange']}
+Data through: {current['date']} | Horizon: {horizon_label}
+{'='*66}
 
-    # ========================================================
-    # PROJECT FOOTER
-    # ========================================================
-    st.html("""
-    <div class="stack-strip">
-        Built with Python · Streamlit · yFinance · Groq
-    </div>
-    """)
+MODEL SIGNAL: {recommendation}
+{('Decision Tree and Random Forest agree.' if models_agree else f"Tree ({votes[0]}) and Forest ({votes[1]}) disagree; HOLD is a cautious fallback.")}
+Logistic Regression separately predicts {results['logistic']['prediction']} (UP/DOWN target).
+Reliability caveat: experimental signal only; model agreement does not establish correctness.
+Recent 20-session price change: {recent_trend_pct:+.2%}.
+Signal/market conflict: {"BUY conflicts with a price below MA5." if recommendation == "BUY" and current["ma5_ratio"] < 0 else "SELL conflicts with a price above MA5." if recommendation == "SELL" and current["ma5_ratio"] > 0 else "No direct MA5 conflict flagged."}
 
-    # ========================================================
-    # DISCLAIMER
-    # ========================================================
-    st.html("""
-    <div class="disclaimer">
-        This project provides a short-term, data-based analysis for educational
-        purposes. It is not financial advice and should not be used as the sole
-        basis for investment decisions.
-    </div>
-    """)
+MARKET SNAPSHOT
+Price: {current['price']:.2f} {current['currency']}
+Vs. MA5: {current['ma5_ratio']:+.2%} — {ma_note}
+RSI (14): {current['rsi']:.1f} — {rsi_note}
+Momentum (5 sessions): {current['momentum']:+.2%}
+Volatility (5 sessions): {current['volatility']:.2f}%
+
+MODEL EVALUATION (Accuracy / Balanced accuracy / Macro F1 / Majority baseline)
+"""
+    for key in ["logistic", "tree", "forest"]:
+        r = results[key]
+        target = "UP/DOWN" if key == "logistic" else "BUY/HOLD/SELL"
+        gap = r["metrics"]["accuracy"] - r["baseline"]
+        report += f"{r['model']} [{target}]: accuracy {r['metrics']['accuracy']:.1%}; balanced accuracy {r['metrics']['balanced_accuracy']:.1%}; macro F1 {r['metrics']['f1']:.1%}; majority baseline {r['baseline']:.1%}; gap {gap:+.1%} ({'above' if gap > 0 else 'below' if gap < 0 else 'at'} baseline).\n"
+    report += f"\nGenerated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}\nEducational project only; not financial advice. Raw class probabilities are not calibrated forecasts.\n"
+    st.download_button("Download analysis report", report, f"{ticker}_analysis_report.txt", "text/plain")
+    with st.expander("Methodology details"):
+        st.markdown("""
+**Data:** 5 years of daily adjusted-price history from Yahoo Finance.
+
+**Features:** MA5 ratio, 5-session momentum, 5-session volatility, RSI(14), and daily return.
+
+**Validation:** chronological 80/20 train/test split with a purge gap equal to the forecast horizon, so training labels cannot use prices from the held-out test period. Hyperparameter tuning uses TimeSeriesSplit with the same gap on training data only. This is a per-ticker historical experiment, not a test of generalization to unseen companies.
+
+**Metrics:** accuracy, balanced accuracy, macro precision/recall/F1, confusion matrices, and majority-class baseline. Logistic and three-class models use different targets, so their scores are not directly comparable.
+
+**Limitations:** some models may perform below baseline; raw class probabilities are not calibrated; feature importance is not causation. A chronological split reduces leakage from overlapping forward labels but does not remove every source of market-data or model-selection bias.
+""")
+    st.caption("Python · Streamlit · yfinance · scikit-learn · Altair · CrewAI/Groq | Educational use only")
